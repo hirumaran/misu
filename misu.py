@@ -448,8 +448,10 @@ def stream_youtube_audio():
         _active_audio_proc = None
 
 
-def show_image_with_ctrl_p():
-    """Show Jarvis image with drag support and ⌘+P to change app."""
+def show_image_with_ctrl_p(close_event=None):
+    """Show Jarvis image with drag support and ⌘+P to change app.
+    If close_event is provided, closes automatically when it's set.
+    """
     img_path = "/Users/thirumarandeepak/Documents/misu/Jarvis.jpeg"
     try:
         import ctypes
@@ -615,6 +617,10 @@ def show_image_with_ctrl_p():
         while running:
             total_dx, total_dy = 0, 0
 
+            # Auto-close if close_event is set
+            if close_event and close_event.is_set():
+                running = False
+
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     running = False
@@ -717,6 +723,176 @@ def prefetch_audio_url():
             log(f"Pre-fetch failed: {result.stderr.strip()}", YELLOW)
     except Exception as e:
         log(f"Pre-fetch error: {e}", YELLOW)
+
+
+def show_gif(gif_path):
+    """Display a GIF using pygame with animation."""
+    if not os.path.isfile(gif_path):
+        log(f"GIF not found: {gif_path}", YELLOW)
+        return
+    try:
+        log("Loading GIF...", CYAN)
+        pygame.init()
+
+        frames = []
+        durations = []
+        import PIL.ImageSequence
+
+        gif = Image.open(gif_path)
+        for frame in PIL.ImageSequence.Iterator(gif):
+            frame = frame.convert("RGBA")
+            pil_frame = frame.resize(
+                (int(frame.width * 1.5), int(frame.height * 1.5)), Image.LANCZOS
+            )
+            pygame_frame = pygame.image.fromstring(
+                pil_frame.tobytes(), pil_frame.size, "RGBA"
+            )
+            frames.append(pygame_frame)
+            durations.append(frame.info.get("duration", 100) / 1000.0)
+
+        if not frames:
+            log("No frames in GIF.", YELLOW)
+            return
+
+        os.environ["SDL_VIDEO_WINDOW_POS"] = "40,40"
+        w, h = frames[0].get_size()
+        screen = pygame.display.set_mode((w, h), pygame.NOFRAME)
+        pygame.display.set_caption("M.I.S.U.")
+
+        subprocess.Popen(
+            [
+                "osascript",
+                "-e",
+                f'tell application "System Events" to set frontmost of every process '
+                f"whose unix id is {os.getpid()} to true",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+        log(f"GIF loaded: {len(frames)} frames.", GREEN)
+
+        running = True
+        clock = pygame.time.Clock()
+        frame_idx = 0
+        frame_timer = 0.0
+        start = time.time()
+
+        while running:
+            dt = clock.tick(60) / 1000.0
+            frame_timer += dt
+
+            if frame_timer >= durations[frame_idx]:
+                frame_timer = 0
+                frame_idx = (frame_idx + 1) % len(frames)
+
+            screen.fill((0, 0, 0))
+            screen.blit(frames[frame_idx], (0, 0))
+            pygame.display.flip()
+
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    running = False
+                elif event.type == pygame.KEYDOWN:
+                    if event.key in (pygame.K_ESCAPE, pygame.K_q, pygame.K_RETURN):
+                        running = False
+                elif event.type == pygame.MOUSEBUTTONDOWN:
+                    if event.button == 3:
+                        running = False
+
+            if time.time() - start > 30:
+                running = False
+
+        pygame.quit()
+        log("GIF closed.", DIM)
+
+    except Exception as e:
+        log(f"GIF error: {e}", RED)
+
+
+def show_gif(gif_path):
+    """Display a GIF using pygame with animation."""
+    if not os.path.isfile(gif_path):
+        log(f"GIF not found: {gif_path}", YELLOW)
+        return
+    try:
+        log("Loading GIF...", CYAN)
+        pygame.init()
+
+        frames = []
+        durations = []
+        import PIL.ImageSequence
+
+        gif = Image.open(gif_path)
+        for frame in PIL.ImageSequence.Iterator(gif):
+            frame = frame.convert("RGBA")
+            pil_frame = frame.resize(
+                (int(frame.width * 1.5), int(frame.height * 1.5)), Image.LANCZOS
+            )
+            pygame_frame = pygame.image.fromstring(
+                pil_frame.tobytes(), pil_frame.size, "RGBA"
+            )
+            frames.append(pygame_frame)
+            durations.append(frame.info.get("duration", 100) / 1000.0)
+
+        if not frames:
+            log("No frames in GIF.", YELLOW)
+            return
+
+        os.environ["SDL_VIDEO_WINDOW_POS"] = "40,40"
+        w, h = frames[0].get_size()
+        screen = pygame.display.set_mode((w, h), pygame.NOFRAME)
+        pygame.display.set_caption("M.I.S.U.")
+
+        subprocess.Popen(
+            [
+                "osascript",
+                "-e",
+                f'tell application "System Events" to set frontmost of every process '
+                f"whose unix id is {os.getpid()} to true",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+        log(f"GIF loaded: {len(frames)} frames.", GREEN)
+
+        running = True
+        clock = pygame.time.Clock()
+        frame_idx = 0
+        frame_timer = 0.0
+        start = time.time()
+
+        while running:
+            dt = clock.tick(60) / 1000.0
+            frame_timer += dt
+
+            if frame_timer >= durations[frame_idx]:
+                frame_timer = 0
+                frame_idx = (frame_idx + 1) % len(frames)
+
+            screen.fill((0, 0, 0))
+            screen.blit(frames[frame_idx], (0, 0))
+            pygame.display.flip()
+
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    running = False
+                elif event.type == pygame.KEYDOWN:
+                    if event.key in (pygame.K_ESCAPE, pygame.K_q, pygame.K_RETURN):
+                        running = False
+                elif event.type == pygame.MOUSEBUTTONDOWN:
+                    if event.button == 3:
+                        running = False
+
+            if time.time() - start > 30:
+                running = False
+
+        pygame.quit()
+        log("GIF closed.", DIM)
+
+    except Exception as e:
+        log(f"GIF error: {e}", RED)
 
 
 def toggle_pause():
@@ -889,24 +1065,40 @@ def main():
             _trigger_event.wait()
             _trigger_event.clear()
 
-            # Play home.mp3 first
             home_path = os.path.join(
                 os.path.dirname(os.path.abspath(__file__)), "home.mp3"
             )
-            if os.path.isfile(home_path):
-                log("Playing home.mp3...", CYAN)
-                subprocess.call(["afplay", home_path])
 
-            # Show image with ⌘+P handling (blocks until closed)
+            # Event to signal when home.mp3 finishes
+            home_done = threading.Event()
+
+            def play_home():
+                if os.path.isfile(home_path):
+                    log("Playing home.mp3...", CYAN)
+                    subprocess.call(["afplay", home_path])
+                home_done.set()
+
+            # Start home.mp3 in background
+            t_home = threading.Thread(target=play_home, daemon=True)
+            t_home.start()
+
+            # Show image simultaneously with home.mp3 (auto-closes when home.mp3 ends)
             pygame.init()
-            show_image_with_ctrl_p()
+            show_image_with_ctrl_p(close_event=home_done)
 
-            # Then launch app + audio in parallel threads
+            # home.mp3 done → launch app + music simultaneously
             t_audio = threading.Thread(target=stream_youtube_audio, daemon=True)
             t_app = threading.Thread(target=open_app, daemon=True)
             t_audio.start()
             t_app.start()
-            log("Trigger threads launched.", GREEN)
+
+            # Wait briefly for app to start
+            time.sleep(1.5)
+
+            # After app + music launched, show freaky.gif
+            show_gif("/Users/thirumarandeepak/Documents/misu/freaky.gif")
+
+            log("Trigger sequence complete.", GREEN)
 
     except KeyboardInterrupt:
         print(f"\n  {YELLOW}M.I.S.U. shutting down. Goodbye.{RESET}\n")
