@@ -19,6 +19,8 @@ import subprocess
 import threading
 import signal
 import atexit
+import pygame
+from PIL import Image
 import numpy as np
 import sounddevice as sd
 
@@ -240,7 +242,7 @@ def stream_youtube_audio():
         elif audio_player_cmd == "mpv":
             _active_audio_proc = subprocess.Popen(
                 ["mpv", "--no-video", "--really-quiet", direct_url],
-                stdin=subprocess.PIPE,
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
@@ -259,6 +261,7 @@ def stream_youtube_audio():
                     "-i",
                     direct_url,
                 ],
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
@@ -273,13 +276,208 @@ def stream_youtube_audio():
 
 
 def show_image():
-    img_path = "/Users/thirumarandeepak/Documents/misu/jarvis.jpeg"
-    if os.path.isfile(img_path):
-        log("Opening jarvis image...", CYAN)
-        subprocess.call(["open", img_path])
-        log("Image opened.", GREEN)
-    else:
-        log(f"Image not found: {img_path}", YELLOW)
+    img_path = "/Users/thirumarandeepak/Documents/misu/Jarvis.jpeg"
+    try:
+        import ctypes
+
+        log("Opening Jarvis image...", CYAN)
+
+        pil_img = Image.open(img_path).convert("RGB")
+        orig_w, orig_h = pil_img.size
+        new_w, new_h = int(orig_w * 1.5), int(orig_h * 1.5)
+        pil_img = pil_img.resize((new_w, new_h), Image.LANCZOS)
+
+        # Position window before creating it
+        os.environ["SDL_VIDEO_WINDOW_POS"] = "40,40"
+
+        img = pygame.image.fromstring(pil_img.tobytes(), (new_w, new_h), "RGB")
+        screen = pygame.display.set_mode((new_w, new_h), pygame.NOFRAME)
+        pygame.display.set_caption("M.I.S.U.")
+        screen.blit(img, (0, 0))
+        pygame.display.flip()
+
+        # Bring pygame window to front via AppleScript
+        subprocess.Popen(
+            [
+                "osascript",
+                "-e",
+                f'tell application "System Events" to set frontmost of every process '
+                f"whose unix id is {os.getpid()} to true",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+        # ── Load SDL2 and get SDL_Window pointer for dragging ──
+        libsdl2 = None
+        window_ptr = None
+        can_drag = False
+
+        for lib_name in [
+            "libSDL2-2.0.0.dylib",
+            "libSDL2.dylib",
+            "/usr/local/lib/libSDL2.dylib",
+            "/opt/homebrew/lib/libSDL2.dylib",
+        ]:
+            try:
+                libsdl2 = ctypes.CDLL(lib_name)
+                break
+            except OSError:
+                continue
+
+        if libsdl2:
+            try:
+                # Set up function signatures
+                libsdl2.SDL_GetWindowPosition.argtypes = [
+                    ctypes.c_void_p,
+                    ctypes.POINTER(ctypes.c_int),
+                    ctypes.POINTER(ctypes.c_int),
+                ]
+                libsdl2.SDL_SetWindowPosition.argtypes = [
+                    ctypes.c_void_p,
+                    ctypes.c_int,
+                    ctypes.c_int,
+                ]
+
+                # ── Strategy 1: SDL_GL_GetCurrentWindow (pygame2 ≥ 2.1) ──
+                try:
+                    libsdl2.SDL_GL_GetCurrentWindow.restype = ctypes.c_void_p
+                    libsdl2.SDL_GL_GetCurrentWindow.argtypes = []
+                    window_ptr = libsdl2.SDL_GL_GetCurrentWindow()
+                    if window_ptr:
+                        can_drag = True
+                        log("SDL2 window via SDL_GL_GetCurrentWindow.", GREEN)
+                except (AttributeError, OSError):
+                    pass
+
+                # ── Strategy 2: SDL_GetWindowFromID(1) — first window ──
+                if not can_drag:
+                    try:
+                        libsdl2.SDL_GetWindowFromID.restype = ctypes.c_void_p
+                        libsdl2.SDL_GetWindowFromID.argtypes = [ctypes.c_uint32]
+                        window_ptr = libsdl2.SDL_GetWindowFromID(1)
+                        if window_ptr:
+                            can_drag = True
+                            log("SDL2 window via SDL_GetWindowFromID(1).", GREEN)
+                    except (AttributeError, OSError):
+                        pass
+
+                # ── Strategy 3: PyCapsule with discovered name ──
+                if not can_drag:
+                    wm_info = pygame.display.get_wm_info()
+                    raw_capsule = wm_info.get("window")
+                    if raw_capsule is not None:
+                        if isinstance(raw_capsule, int):
+                            window_ptr = raw_capsule
+                            can_drag = True
+                            log("SDL2 window pointer (raw int).", GREEN)
+                        else:
+                            # Discover the actual capsule name
+                            ctypes.pythonapi.PyCapsule_GetName.restype = ctypes.c_char_p
+                            ctypes.pythonapi.PyCapsule_GetName.argtypes = [ctypes.py_object]
+                            try:
+                                actual_name = ctypes.pythonapi.PyCapsule_GetName(raw_capsule)
+                                log(f"PyCapsule name = {actual_name!r}", DIM)
+                            except Exception:
+                                actual_name = None
+
+                            ctypes.pythonapi.PyCapsule_GetPointer.restype = ctypes.c_void_p
+                            ctypes.pythonapi.PyCapsule_GetPointer.argtypes = [
+                                ctypes.py_object,
+                                ctypes.c_char_p,
+                            ]
+                            try:
+                                window_ptr = ctypes.pythonapi.PyCapsule_GetPointer(
+                                    raw_capsule, actual_name
+                                )
+                                if window_ptr:
+                                    # This is likely an NSWindow*, not SDL_Window*.
+                                    # Use SDL_GetWindowFromID(1) as the real SDL handle
+                                    # and only use this as proof the window exists.
+                                    try:
+                                        libsdl2.SDL_GetWindowFromID.restype = ctypes.c_void_p
+                                        libsdl2.SDL_GetWindowFromID.argtypes = [ctypes.c_uint32]
+                                        sdl_win = libsdl2.SDL_GetWindowFromID(1)
+                                        if sdl_win:
+                                            window_ptr = sdl_win
+                                    except Exception:
+                                        pass
+                                    can_drag = True
+                                    log("SDL2 window via PyCapsule unwrap.", GREEN)
+                            except (ValueError, OSError) as e:
+                                log(f"PyCapsule unwrap failed: {e}", YELLOW)
+
+                if not can_drag:
+                    log("Could not get SDL2 window — dragging disabled.", YELLOW)
+
+            except Exception as e:
+                log(f"SDL2 drag setup failed: {e}", YELLOW)
+                can_drag = False
+        else:
+            log("SDL2 library not found — dragging disabled.", YELLOW)
+
+        if can_drag:
+            log("Drag: left-click + move | Close: right-click / Esc / Q", DIM)
+        else:
+            log("Close: right-click / Esc / Q", DIM)
+
+        dragging = False
+        start = time.time()
+        running = True
+        clock = pygame.time.Clock()
+
+        # Cache initial window position so we never need SDL_GetWindowPosition
+        if can_drag:
+            wx_val, wy_val = ctypes.c_int(0), ctypes.c_int(0)
+            libsdl2.SDL_GetWindowPosition(
+                window_ptr, ctypes.byref(wx_val), ctypes.byref(wy_val)
+            )
+            win_x, win_y = wx_val.value, wy_val.value
+        else:
+            win_x, win_y = 40, 40
+
+        while running:
+            # Accumulate all pending motion deltas in one pass
+            total_dx, total_dy = 0, 0
+
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    running = False
+                elif event.type == pygame.KEYDOWN:
+                    if event.key in (pygame.K_ESCAPE, pygame.K_q, pygame.K_RETURN):
+                        running = False
+                elif event.type == pygame.MOUSEBUTTONDOWN:
+                    if event.button == 1:
+                        dragging = True
+                    elif event.button == 3:
+                        running = False
+                elif event.type == pygame.MOUSEBUTTONUP:
+                    if event.button == 1:
+                        dragging = False
+                elif event.type == pygame.MOUSEMOTION and dragging and can_drag:
+                    total_dx += event.rel[0]
+                    total_dy += event.rel[1]
+
+            # Apply accumulated motion in a single SDL call
+            if total_dx != 0 or total_dy != 0:
+                win_x += total_dx
+                win_y += total_dy
+                libsdl2.SDL_SetWindowPosition(window_ptr, win_x, win_y)
+
+            if time.time() - start > 30:
+                running = False
+
+            # High FPS during drag for smoothness, throttle when idle
+            if dragging:
+                clock.tick(120)
+            else:
+                clock.tick(60)
+
+        pygame.quit()
+        log("Image closed.", DIM)
+
+    except Exception as e:
+        log(f"Image error: {e}", RED)
 
 
 def prefetch_audio_url():
@@ -303,19 +501,23 @@ def prefetch_audio_url():
 
 
 def toggle_pause():
-    """Pause or resume currently playing audio."""
+    """Pause or resume currently playing audio via SIGSTOP/SIGCONT."""
     global _audio_paused
     if not _active_audio_proc or _active_audio_proc.poll() is not None:
         log("No audio playing.", DIM)
         return
-    if _audio_paused:
-        os.kill(_active_audio_proc.pid, signal.SIGCONT)
-        _audio_paused = False
-        log("Audio resumed.", GREEN)
-    else:
-        os.kill(_active_audio_proc.pid, signal.SIGSTOP)
-        _audio_paused = True
-        log("Audio paused.", YELLOW)
+
+    try:
+        if _audio_paused:
+            os.kill(_active_audio_proc.pid, signal.SIGCONT)
+            _audio_paused = False
+            log("Audio resumed.", GREEN)
+        else:
+            os.kill(_active_audio_proc.pid, signal.SIGSTOP)
+            _audio_paused = True
+            log("Audio paused.", YELLOW)
+    except OSError as e:
+        log(f"Pause toggle error: {e}", RED)
 
 
 def cleanup():
@@ -358,9 +560,7 @@ def on_trigger():
         t_app = threading.Thread(target=open_app, daemon=True)
         t_audio.start()
         t_app.start()
-        # Image opens last so it appears on top
-        threading.Timer(0.5, show_image).start()
-        # Don't join — let them run, we return to listening after cooldown
+        log("Trigger threads launched.", GREEN)
 
     finally:
         trigger_lock.release()
@@ -453,27 +653,40 @@ def main():
         subprocess.call(["afplay", home_path])
 
     threading.Thread(target=stream_youtube_audio, daemon=True).start()
-    threading.Thread(target=open_app, daemon=True).start()
-    # Image opens last so it appears on top
-    threading.Timer(0.5, show_image).start()
+    t_app = threading.Thread(target=open_app, daemon=True)
+    t_app.start()
+    t_app.join(timeout=10)  # wait for app to open before showing image
+    time.sleep(2)  # give the app extra time to fully render
 
+    # Run sounddevice + terminal input in a background thread
+    def listener_loop():
+        try:
+            with sd.InputStream(
+                samplerate=SAMPLE_RATE,
+                blocksize=BLOCK_SIZE,
+                channels=1,
+                dtype="float32",
+                callback=audio_callback,
+            ):
+                while True:
+                    cmd = input().strip().lower()
+                    if cmd == "s":
+                        toggle_pause()
+        except Exception as e:
+            log(f"Listener error: {e}", RED)
+
+    threading.Thread(target=listener_loop, daemon=True).start()
+
+    # Pygame must run on the main thread (macOS requirement)
+    pygame.init()
+    show_image()
+
+    # Keep main thread alive after image closes so listener keeps working
     try:
-        with sd.InputStream(
-            samplerate=SAMPLE_RATE,
-            blocksize=BLOCK_SIZE,
-            channels=1,
-            dtype="float32",
-            callback=audio_callback,
-        ):
-            while True:
-                cmd = input().strip().lower()
-                if cmd == "s":
-                    toggle_pause()
+        while True:
+            time.sleep(1)
     except KeyboardInterrupt:
         print(f"\n  {YELLOW}M.I.S.U. shutting down. Goodbye.{RESET}\n")
-    except Exception as e:
-        log(f"Fatal error: {e}", RED)
-        sys.exit(1)
 
 
 if __name__ == "__main__":
