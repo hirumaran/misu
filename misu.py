@@ -831,23 +831,17 @@ def main():
     print(f"  {GREEN}{BOLD}All checks passed.{RESET}")
     print(f"  {CYAN}Listening for double clap... (Ctrl+C to stop){RESET}")
     print(
-        f"  {DIM}Controls: {YELLOW}s{RESET}{DIM} = pause/resume  |  {YELLOW}Ctrl+P{RESET}{DIM} = change app{RESET}\n"
+        f"  {DIM}Controls: {YELLOW}s{RESET}{DIM} = pause/resume  |  {YELLOW}⌘+P{RESET}{DIM} = change app{RESET}\n"
     )
 
     # Pre-fetch audio URL for instant playback
     prefetch_audio_url()
 
-    # Play home.mp3 first, then auto-launch everything
+    # Play home.mp3 first
     home_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "home.mp3")
     if os.path.isfile(home_path):
         log("Playing home.mp3...", CYAN)
         subprocess.call(["afplay", home_path])
-
-    threading.Thread(target=stream_youtube_audio, daemon=True).start()
-    t_app = threading.Thread(target=open_app, daemon=True)
-    t_app.start()
-    t_app.join(timeout=10)  # wait for app to open before showing image
-    time.sleep(2)  # give the app extra time to fully render
 
     # Run sounddevice + terminal input in a background thread
     def listener_loop():
@@ -1028,19 +1022,19 @@ def main():
 
             if can_drag:
                 log(
-                    "Drag: left-click + move | Close: right-click / Esc / Q | Ctrl+P: change app",
+                    "Drag: left-click + move | Close: right-click / Esc / Q | ⌘+P: change app",
                     DIM,
                 )
             else:
-                log("Close: right-click / Esc / Q | Ctrl+P: change app", DIM)
+                log("Close: right-click / Esc / Q | ⌘+P: change app", DIM)
 
             dragging = False
             start = time.time()
             running = True
             clock = pygame.time.Clock()
 
-            # Track modifier keys
-            ctrl_pressed = False
+            # Track modifier keys (Command key on Mac)
+            cmd_pressed = False
 
             # Cache initial window position so we never need SDL_GetWindowPosition
             if can_drag:
@@ -1060,10 +1054,16 @@ def main():
                     if event.type == pygame.QUIT:
                         running = False
                     elif event.type == pygame.KEYDOWN:
-                        if event.key == pygame.K_LCTRL or event.key == pygame.K_RCTRL:
-                            ctrl_pressed = True
-                        elif event.key == pygame.K_p and ctrl_pressed:
-                            # Ctrl+P pressed - show app menu
+                        # Check for Command key (Left/Right Command on Mac)
+                        if event.key in (
+                            pygame.K_LMETA,
+                            pygame.K_RMETA,
+                            pygame.K_LSUPER,
+                            pygame.K_RSUPER,
+                        ):
+                            cmd_pressed = True
+                        elif event.key == pygame.K_p and cmd_pressed:
+                            # ⌘+P pressed - show app menu
                             pygame.quit()
                             print(f"\n  {CYAN}Changing default app...{RESET}")
                             show_app_menu()
@@ -1107,8 +1107,13 @@ def main():
                         ):
                             running = False
                     elif event.type == pygame.KEYUP:
-                        if event.key == pygame.K_LCTRL or event.key == pygame.K_RCTRL:
-                            ctrl_pressed = False
+                        if event.key in (
+                            pygame.K_LMETA,
+                            pygame.K_RMETA,
+                            pygame.K_LSUPER,
+                            pygame.K_RSUPER,
+                        ):
+                            cmd_pressed = False
                     elif event.type == pygame.MOUSEBUTTONDOWN:
                         if event.button == 1:
                             dragging = True
