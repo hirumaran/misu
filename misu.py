@@ -89,6 +89,7 @@ _active_audio_proc = None
 _audio_paused = False
 APP_TO_OPEN = DEFAULT_APP
 _trigger_event = threading.Event()
+_audio_started_event = threading.Event()
 
 
 def discover_apps():
@@ -384,6 +385,7 @@ def stream_youtube_audio():
             )
             if url_result.returncode != 0:
                 log(f"yt-dlp URL extract failed: {url_result.stderr.strip()}", RED)
+                _audio_started_event.set()  # unblock waiters even on failure
                 return
             direct_url = url_result.stdout.strip()
 
@@ -405,6 +407,7 @@ def stream_youtube_audio():
             t = threading.Thread(target=curl_writer, daemon=True)
             t.start()
             _active_audio_proc = subprocess.Popen(["afplay", fifo_path])
+            _audio_started_event.set()  # signal that audio has started
             _active_audio_proc.wait()
             _active_audio_proc = None
             try:
@@ -419,6 +422,7 @@ def stream_youtube_audio():
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
+            _audio_started_event.set()  # signal that audio has started
             _active_audio_proc.wait()
             _active_audio_proc = None
 
@@ -438,6 +442,7 @@ def stream_youtube_audio():
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
+            _audio_started_event.set()  # signal that audio has started
             _active_audio_proc.wait()
             _active_audio_proc = None
 
@@ -445,6 +450,7 @@ def stream_youtube_audio():
 
     except Exception as e:
         log(f"Audio stream error: {e}", RED)
+        _audio_started_event.set()  # unblock waiters even on error
         _active_audio_proc = None
 
 
@@ -703,7 +709,7 @@ def show_image_with_ctrl_p(close_event=None):
                 win_y += total_dy
                 libsdl2.SDL_SetWindowPosition(window_ptr, win_x, win_y)
 
-            if time.time() - start > 30:
+            if time.time() - start > 1.5:
                 running = False
 
             if dragging:
@@ -813,7 +819,7 @@ def show_gif(gif_path):
                     if event.button == 3:
                         running = False
 
-            if time.time() - start > 30:
+            if time.time() - start > 1.5:
                 running = False
 
         pygame.quit()
@@ -1033,14 +1039,26 @@ def main():
             pygame.init()
             show_image_with_ctrl_p(close_event=home_done)
 
-            # home.mp3 done → launch app + music simultaneously, no delay
+            # home.mp3 done → start music
+            _audio_started_event.clear()
             t_audio = threading.Thread(target=stream_youtube_audio, daemon=True)
-            t_app = threading.Thread(target=open_app, daemon=True)
             t_audio.start()
+
+            # Wait until the audio player process has actually spawned
+            _audio_started_event.wait(timeout=30)
+
+            # Wait 3.5 seconds so the song is audibly playing
+            time.sleep(3.5)
+
+            # Now open the app
+            t_app = threading.Thread(target=open_app, daemon=True)
             t_app.start()
 
             # Wait for app to finish launching
             t_app.join(timeout=15)
+
+            # Short delay before GIF appears
+            time.sleep(0.75)
 
             # After app launched, show freaky.gif
             show_gif("/Users/thirumarandeepak/Documents/misu/freaky.gif")
