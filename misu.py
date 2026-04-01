@@ -724,7 +724,7 @@ def open_app():
 
 
 def on_trigger():
-    """Fired on double-clap detection. Launches app + audio simultaneously."""
+    """Fired on double-clap detection. Plays home.mp3, then launches app + audio."""
     global last_trigger_time
     now = time.time()
 
@@ -737,7 +737,13 @@ def on_trigger():
 
         print(ACTIVATION_MSG, flush=True)
 
-        # Launch all in parallel threads so none blocks the listener
+        # Play home.mp3 first
+        home_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "home.mp3")
+        if os.path.isfile(home_path):
+            log("Playing home.mp3...", CYAN)
+            subprocess.call(["afplay", home_path])
+
+        # Then launch app + audio in parallel threads
         t_audio = threading.Thread(target=stream_youtube_audio, daemon=True)
         t_app = threading.Thread(target=open_app, daemon=True)
         t_audio.start()
@@ -818,10 +824,6 @@ def main():
     # Load saved config first
     load_config()
 
-    # Show app selection menu if --select-app flag is passed
-    if len(sys.argv) > 1 and sys.argv[1] == "--select-app":
-        show_app_menu()
-
     print_config()
 
     if not run_dependency_checks():
@@ -836,12 +838,6 @@ def main():
 
     # Pre-fetch audio URL for instant playback
     prefetch_audio_url()
-
-    # Play home.mp3 first
-    home_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "home.mp3")
-    if os.path.isfile(home_path):
-        log("Playing home.mp3...", CYAN)
-        subprocess.call(["afplay", home_path])
 
     # Run sounddevice + terminal input in a background thread
     def listener_loop():
