@@ -295,7 +295,7 @@ def check_app_exists(app_name):
         )
         if result.returncode == 0 or result2.stdout.strip():
             return True
-        # Last resort: try open -Ra which resolves without launching
+        # Last resort: open -Ra which resolves without launching
         result3 = subprocess.run(
             ["open", "-Ra", app_name], capture_output=True, timeout=5
         )
@@ -744,6 +744,15 @@ def prefetch_audio_url():
         log(f"Pre-fetch error: {e}", YELLOW)
 
 
+def clear_cache():
+    """Clear cached audio URL and re-fetch it."""
+    global _cached_audio_url
+    _cached_audio_url = None
+    log("Cache cleared.", YELLOW)
+    log("Re-fetching audio URL...", DIM)
+    prefetch_audio_url()
+
+
 def show_gif(gif_path):
     """Display a GIF using pygame with animation."""
     if not os.path.isfile(gif_path):
@@ -864,24 +873,76 @@ def open_app():
     """Open the configured app immediately and bring it to front."""
     try:
         log(f"Launching {APP_TO_OPEN}...", CYAN)
+
+        # Step 1: Find the actual .app path on disk (handles name mismatches)
+        app_path = None
+        search_dirs = [
+            "/Applications",
+            "/Applications/Utilities",
+            "/System/Applications",
+            os.path.expanduser("~/Applications"),
+        ]
+        for d in search_dirs:
+            candidate = os.path.join(d, f"{APP_TO_OPEN}.app")
+            if os.path.isdir(candidate):
+                app_path = candidate
+                break
+
+        # Also search for partial matches (e.g., "ChatGPT" might be in a subfolder)
+        if not app_path:
+            try:
+                result = subprocess.run(
+                    ["mdfind", f"kMDItemKind == 'Application' && kMDItemDisplayName == '{APP_TO_OPEN}'"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                paths = result.stdout.strip().split("\n")
+                if paths and paths[0]:
+                    app_path = paths[0]
+            except Exception:
+                pass
+
+        # Step 2: Launch using the resolved path, or fall back to name
+        if app_path:
+            log(f"Resolved app path: {app_path}", DIM)
+            subprocess.run(["open", app_path], check=False, capture_output=True, timeout=10)
+        else:
+            subprocess.run(["open", "-a", APP_TO_OPEN], check=False, capture_output=True, timeout=10)
+
+        # Step 3: Wait for it to actually start
+        time.sleep(2.0)
+
+        # Step 4: Try multiple ways to bring it to front
+        # 4a: AppleScript activate
         subprocess.run(
-            ["open", "-a", APP_TO_OPEN],
-            check=False,
-            capture_output=True,
-            timeout=10,
+            ["osascript", "-e", f'tell application "{APP_TO_OPEN}" to activate'],
+            check=False, capture_output=True, timeout=10,
         )
-        # Ensure it's in front
-        time.sleep(0.5)
+        time.sleep(0.3)
+
+        # 4b: System Events — match by name (handles apps whose process name differs)
         subprocess.run(
             [
-                "osascript",
-                "-e",
-                f'tell application "{APP_TO_OPEN}" to activate',
+                "osascript", "-e",
+                (
+                    'tell application "System Events"\n'
+                    '  repeat with p in (every process whose background only is false)\n'
+                    f'    if name of p contains "{APP_TO_OPEN}" then\n'
+                    '      set frontmost of p to true\n'
+                    '      exit repeat\n'
+                    '    end if\n'
+                    '  end repeat\n'
+                    'end tell'
+                ),
             ],
-            check=False,
-            capture_output=True,
-            timeout=10,
+            check=False, capture_output=True, timeout=10,
         )
+
+        # 4c: If it's still not in front, try open again (brings existing window forward)
+        if app_path:
+            subprocess.run(["open", app_path], check=False, capture_output=True, timeout=10)
+        else:
+            subprocess.run(["open", "-a", APP_TO_OPEN], check=False, capture_output=True, timeout=10)
+
         log(f"{APP_TO_OPEN} launched.", GREEN)
     except Exception as e:
         log(f"Failed to open {APP_TO_OPEN}: {e}", RED)
@@ -985,7 +1046,7 @@ def main():
     print(f"  {GREEN}{BOLD}All checks passed.{RESET}")
     print(f"  {CYAN}Listening for double clap... (Ctrl+C to stop){RESET}")
     print(
-        f"  {DIM}Controls: {YELLOW}s{RESET}{DIM} = pause/resume  |  {YELLOW}a{RESET}{DIM} = change app{RESET}\n"
+        f"  {DIM}Controls: {YELLOW}s{RESET}{DIM} = pause/resume  |  {YELLOW}a{RESET}{DIM} = change app  |  {YELLOW}c{RESET}{DIM} = clear cache{RESET}\n"
     )
 
     # Pre-fetch audio URL for instant playback
@@ -1007,6 +1068,8 @@ def main():
                         toggle_pause()
                     elif cmd == "a":
                         show_app_menu()
+                    elif cmd == "c":
+                        clear_cache()
         except Exception as e:
             log(f"Listener error: {e}", RED)
 
