@@ -33,15 +33,15 @@ import sounddevice as sd
 # ██  C O N F I G U R A T I O N  ██
 # ═══════════════════════════════════════════════════════════════
 YOUTUBE_URL = "https://youtu.be/pAgnJDJN4VA?si=zAr_El1xtW_ugq8K"
-CLAP_THRESHOLD = 0.15  # was 0.25, lower so it actually catches claps
-DOUBLE_CLAP_WINDOW = 0.7  # Max seconds between two claps
+CLAP_THRESHOLD = 0.10  # lower = more sensitive to claps
+DOUBLE_CLAP_WINDOW = 1.0  # Max seconds between two claps
 MIN_CLAP_GAP = 0.08  # Min seconds between claps (echo reject)
-COOLDOWN_AFTER_TRIGGER = 3.0  # Seconds to ignore mic after trigger
-FREQ_RATIO_THRESHOLD = 0.25  # was 0.35, less aggressive filtering
-MAX_SUSTAINED_CHUNKS = 6  # was 4, claps can span a few more blocks
-MIN_CREST_FACTOR = 2.5  # NEW: peak/RMS ratio, claps are spiky, voice isn't
+COOLDOWN_AFTER_TRIGGER = 2.0  # Seconds to ignore mic after trigger
+FREQ_RATIO_THRESHOLD = 0.15  # less aggressive frequency filtering
+MAX_SUSTAINED_CHUNKS = 8  # claps can span a few more blocks
+MIN_CREST_FACTOR = 2.0  # peak/RMS ratio, lowered for easier detection
 SAMPLE_RATE = 44100
-BLOCK_SIZE = 1024
+BLOCK_SIZE = 512
 
 CONFIG_FILE = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "misu_config.json"
@@ -73,7 +73,7 @@ BANNER = rf"""
 ACTIVATION_MSG = f"""
 {YELLOW}{BOLD}
   ╔══════════════════════════════════════════╗
-  ║  ⚡  DOUBLE CLAP DETECTED — ACTIVATING    ║
+  ║     DOUBLE CLAP DETECTED — ACTIVATING   ║
   ║      S Y S T E M   E N G A G E D         ║
   ╚══════════════════════════════════════════╝
 {RESET}"""
@@ -449,7 +449,7 @@ def stream_youtube_audio():
 
 
 def show_image_with_ctrl_p(close_event=None):
-    """Show Jarvis image with drag support and ⌘+P to change app.
+    """Show Jarvis image with drag support and A to change app.
     If close_event is provided, closes automatically when it's set.
     """
     img_path = "/Users/thirumarandeepak/Documents/misu/Jarvis.jpeg"
@@ -471,16 +471,44 @@ def show_image_with_ctrl_p(close_event=None):
         screen.blit(img, (0, 0))
         pygame.display.flip()
 
+        # Force keyboard focus onto the pygame window
+        pygame.event.set_grab(False)
+        sdl_focused = False
+        try:
+            sdl_video = pygame.display.get_wm_info()
+            # On macOS, clicking the window is needed; raise it to front
+        except Exception:
+            pass
+
         subprocess.Popen(
             [
                 "osascript",
                 "-e",
-                f'tell application "System Events" to set frontmost of every process '
+                'tell application "System Events" to set frontmost of every process '
                 f"whose unix id is {os.getpid()} to true",
             ],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+        # Small delay to let OS process the frontmost request
+        time.sleep(0.2)
+
+        # Click the center of our window to ensure keyboard focus
+        try:
+            subprocess.Popen(
+                [
+                    "osascript",
+                    "-e",
+                    f'tell application "System Events"\n'
+                    f'  set frontProcess to first process whose unix id is {os.getpid()}\n'
+                    f'  set frontmost of frontProcess to true\n'
+                    f'end tell',
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            pass
 
         libsdl2 = None
         window_ptr = None
@@ -593,17 +621,17 @@ def show_image_with_ctrl_p(close_event=None):
 
         if can_drag:
             log(
-                "Drag: left-click + move | Close: right-click / Esc / Q | ⌘+P: change app",
+                "Drag: left-click + move | Close: right-click / Esc / Q | A: change app",
                 DIM,
             )
         else:
-            log("Close: right-click / Esc / Q | ⌘+P: change app", DIM)
+            log("Close: right-click / Esc / Q | A: change app", DIM)
+        log("(You can also type 'a' in the terminal to change app)", DIM)
 
         dragging = False
         start = time.time()
         running = True
         clock = pygame.time.Clock()
-        cmd_pressed = False
 
         if can_drag:
             wx_val, wy_val = ctypes.c_int(0), ctypes.c_int(0)
@@ -625,14 +653,7 @@ def show_image_with_ctrl_p(close_event=None):
                 if event.type == pygame.QUIT:
                     running = False
                 elif event.type == pygame.KEYDOWN:
-                    if event.key in (
-                        pygame.K_LMETA,
-                        pygame.K_RMETA,
-                        pygame.K_LSUPER,
-                        pygame.K_RSUPER,
-                    ):
-                        cmd_pressed = True
-                    elif event.key == pygame.K_p and cmd_pressed:
+                    if event.key == pygame.K_a:
                         pygame.quit()
                         print(f"\n  {CYAN}Changing default app...{RESET}")
                         show_app_menu()
@@ -665,14 +686,6 @@ def show_image_with_ctrl_p(close_event=None):
                         continue
                     elif event.key in (pygame.K_ESCAPE, pygame.K_q, pygame.K_RETURN):
                         running = False
-                elif event.type == pygame.KEYUP:
-                    if event.key in (
-                        pygame.K_LMETA,
-                        pygame.K_RMETA,
-                        pygame.K_LSUPER,
-                        pygame.K_RSUPER,
-                    ):
-                        cmd_pressed = False
                 elif event.type == pygame.MOUSEBUTTONDOWN:
                     if event.button == 1:
                         dragging = True
@@ -742,92 +755,7 @@ def show_gif(gif_path):
         for frame in PIL.ImageSequence.Iterator(gif):
             frame = frame.convert("RGBA")
             pil_frame = frame.resize(
-                (int(frame.width * 1.5), int(frame.height * 1.5)), Image.LANCZOS
-            )
-            pygame_frame = pygame.image.fromstring(
-                pil_frame.tobytes(), pil_frame.size, "RGBA"
-            )
-            frames.append(pygame_frame)
-            durations.append(frame.info.get("duration", 100) / 1000.0)
-
-        if not frames:
-            log("No frames in GIF.", YELLOW)
-            return
-
-        os.environ["SDL_VIDEO_WINDOW_POS"] = "40,40"
-        w, h = frames[0].get_size()
-        screen = pygame.display.set_mode((w, h), pygame.NOFRAME)
-        pygame.display.set_caption("M.I.S.U.")
-
-        subprocess.Popen(
-            [
-                "osascript",
-                "-e",
-                f'tell application "System Events" to set frontmost of every process '
-                f"whose unix id is {os.getpid()} to true",
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-
-        log(f"GIF loaded: {len(frames)} frames.", GREEN)
-
-        running = True
-        clock = pygame.time.Clock()
-        frame_idx = 0
-        frame_timer = 0.0
-        start = time.time()
-
-        while running:
-            dt = clock.tick(60) / 1000.0
-            frame_timer += dt
-
-            if frame_timer >= durations[frame_idx]:
-                frame_timer = 0
-                frame_idx = (frame_idx + 1) % len(frames)
-
-            screen.fill((0, 0, 0))
-            screen.blit(frames[frame_idx], (0, 0))
-            pygame.display.flip()
-
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    running = False
-                elif event.type == pygame.KEYDOWN:
-                    if event.key in (pygame.K_ESCAPE, pygame.K_q, pygame.K_RETURN):
-                        running = False
-                elif event.type == pygame.MOUSEBUTTONDOWN:
-                    if event.button == 3:
-                        running = False
-
-            if time.time() - start > 30:
-                running = False
-
-        pygame.quit()
-        log("GIF closed.", DIM)
-
-    except Exception as e:
-        log(f"GIF error: {e}", RED)
-
-
-def show_gif(gif_path):
-    """Display a GIF using pygame with animation."""
-    if not os.path.isfile(gif_path):
-        log(f"GIF not found: {gif_path}", YELLOW)
-        return
-    try:
-        log("Loading GIF...", CYAN)
-        pygame.init()
-
-        frames = []
-        durations = []
-        import PIL.ImageSequence
-
-        gif = Image.open(gif_path)
-        for frame in PIL.ImageSequence.Iterator(gif):
-            frame = frame.convert("RGBA")
-            pil_frame = frame.resize(
-                (int(frame.width * 1.5), int(frame.height * 1.5)), Image.LANCZOS
+                (int(frame.width * 0.76), int(frame.height * 0.76)), Image.LANCZOS
             )
             pygame_frame = pygame.image.fromstring(
                 pil_frame.tobytes(), pil_frame.size, "RGBA"
@@ -927,10 +855,27 @@ def cleanup():
 
 
 def open_app():
-    """Open the configured app via macOS open command."""
+    """Open the configured app immediately and bring it to front."""
     try:
-        log(f"Opening {APP_TO_OPEN}...", CYAN)
-        subprocess.run(["open", "-a", APP_TO_OPEN], check=True, capture_output=True)
+        log(f"Launching {APP_TO_OPEN}...", CYAN)
+        subprocess.run(
+            ["open", "-a", APP_TO_OPEN],
+            check=False,
+            capture_output=True,
+            timeout=10,
+        )
+        # Ensure it's in front
+        time.sleep(0.5)
+        subprocess.run(
+            [
+                "osascript",
+                "-e",
+                f'tell application "{APP_TO_OPEN}" to activate',
+            ],
+            check=False,
+            capture_output=True,
+            timeout=10,
+        )
         log(f"{APP_TO_OPEN} launched.", GREEN)
     except Exception as e:
         log(f"Failed to open {APP_TO_OPEN}: {e}", RED)
@@ -1034,7 +979,7 @@ def main():
     print(f"  {GREEN}{BOLD}All checks passed.{RESET}")
     print(f"  {CYAN}Listening for double clap... (Ctrl+C to stop){RESET}")
     print(
-        f"  {DIM}Controls: {YELLOW}s{RESET}{DIM} = pause/resume  |  {YELLOW}⌘+P{RESET}{DIM} = change app{RESET}\n"
+        f"  {DIM}Controls: {YELLOW}s{RESET}{DIM} = pause/resume  |  {YELLOW}a{RESET}{DIM} = change app{RESET}\n"
     )
 
     # Pre-fetch audio URL for instant playback
@@ -1054,6 +999,8 @@ def main():
                     cmd = input().strip().lower()
                     if cmd == "s":
                         toggle_pause()
+                    elif cmd == "a":
+                        show_app_menu()
         except Exception as e:
             log(f"Listener error: {e}", RED)
 
@@ -1086,16 +1033,16 @@ def main():
             pygame.init()
             show_image_with_ctrl_p(close_event=home_done)
 
-            # home.mp3 done → launch app + music simultaneously
+            # home.mp3 done → launch app + music simultaneously, no delay
             t_audio = threading.Thread(target=stream_youtube_audio, daemon=True)
             t_app = threading.Thread(target=open_app, daemon=True)
             t_audio.start()
             t_app.start()
 
-            # Wait briefly for app to start
-            time.sleep(1.5)
+            # Wait for app to finish launching
+            t_app.join(timeout=15)
 
-            # After app + music launched, show freaky.gif
+            # After app launched, show freaky.gif
             show_gif("/Users/thirumarandeepak/Documents/misu/freaky.gif")
 
             log("Trigger sequence complete.", GREEN)
