@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-M.I.S.U. — Machine-Initiated Startup Unit
+M.I.S.U.
 
 A terminal-only macOS background mic listener.
 Detects a double-clap and simultaneously opens an app + streams YouTube audio.
@@ -39,9 +39,10 @@ MIN_CLAP_GAP = 0.08  # Min seconds between claps (echo reject)
 COOLDOWN_AFTER_TRIGGER = 2.0  # Seconds to ignore mic after trigger
 FREQ_RATIO_THRESHOLD = 0.15  # less aggressive frequency filtering
 MAX_SUSTAINED_CHUNKS = 8  # claps can span a few more blocks
-MIN_CREST_FACTOR = 2.0  # peak/RMS ratio, lowered for easier detection
+MIN_CREST_FACTOR = 1.5  # peak/RMS ratio, lowered for easier detection
 SAMPLE_RATE = 44100
 BLOCK_SIZE = 512
+DEBUG_CLAP = True  # Set to True to print which filter rejects each block
 
 CONFIG_FILE = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "misu_config.json"
@@ -97,6 +98,9 @@ _audio_paused = False
 APP_TO_OPEN = DEFAULT_APP
 _trigger_event = threading.Event()
 _audio_started_event = threading.Event()
+cycle_running = False
+_noise_floor = 0.01
+_noise_floor_alpha = 0.995
 
 
 def discover_apps():
@@ -513,9 +517,9 @@ def show_image_with_ctrl_p(close_event=None):
                     "osascript",
                     "-e",
                     f'tell application "System Events"\n'
-                    f'  set frontProcess to first process whose unix id is {os.getpid()}\n'
-                    f'  set frontmost of frontProcess to true\n'
-                    f'end tell',
+                    f"  set frontProcess to first process whose unix id is {os.getpid()}\n"
+                    f"  set frontmost of frontProcess to true\n"
+                    f"end tell",
                 ],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -899,8 +903,13 @@ def open_app():
         if not app_path:
             try:
                 result = subprocess.run(
-                    ["mdfind", f"kMDItemKind == 'Application' && kMDItemDisplayName == '{APP_TO_OPEN}'"],
-                    capture_output=True, text=True, timeout=5,
+                    [
+                        "mdfind",
+                        f"kMDItemKind == 'Application' && kMDItemDisplayName == '{APP_TO_OPEN}'",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
                 )
                 paths = result.stdout.strip().split("\n")
                 if paths and paths[0]:
@@ -911,9 +920,16 @@ def open_app():
         # Step 2: Launch using the resolved path, or fall back to name
         if app_path:
             log(f"Resolved app path: {app_path}", DIM)
-            subprocess.run(["open", app_path], check=False, capture_output=True, timeout=10)
+            subprocess.run(
+                ["open", app_path], check=False, capture_output=True, timeout=10
+            )
         else:
-            subprocess.run(["open", "-a", APP_TO_OPEN], check=False, capture_output=True, timeout=10)
+            subprocess.run(
+                ["open", "-a", APP_TO_OPEN],
+                check=False,
+                capture_output=True,
+                timeout=10,
+            )
 
         # Step 3: Wait for it to actually start
         time.sleep(2.0)
@@ -922,33 +938,45 @@ def open_app():
         # 4a: AppleScript activate
         subprocess.run(
             ["osascript", "-e", f'tell application "{APP_TO_OPEN}" to activate'],
-            check=False, capture_output=True, timeout=10,
+            check=False,
+            capture_output=True,
+            timeout=10,
         )
         time.sleep(0.3)
 
         # 4b: System Events — match by name (handles apps whose process name differs)
         subprocess.run(
             [
-                "osascript", "-e",
+                "osascript",
+                "-e",
                 (
                     'tell application "System Events"\n'
-                    '  repeat with p in (every process whose background only is false)\n'
+                    "  repeat with p in (every process whose background only is false)\n"
                     f'    if name of p contains "{APP_TO_OPEN}" then\n'
-                    '      set frontmost of p to true\n'
-                    '      exit repeat\n'
-                    '    end if\n'
-                    '  end repeat\n'
-                    'end tell'
+                    "      set frontmost of p to true\n"
+                    "      exit repeat\n"
+                    "    end if\n"
+                    "  end repeat\n"
+                    "end tell"
                 ),
             ],
-            check=False, capture_output=True, timeout=10,
+            check=False,
+            capture_output=True,
+            timeout=10,
         )
 
         # 4c: If it's still not in front, try open again (brings existing window forward)
         if app_path:
-            subprocess.run(["open", app_path], check=False, capture_output=True, timeout=10)
+            subprocess.run(
+                ["open", app_path], check=False, capture_output=True, timeout=10
+            )
         else:
-            subprocess.run(["open", "-a", APP_TO_OPEN], check=False, capture_output=True, timeout=10)
+            subprocess.run(
+                ["open", "-a", APP_TO_OPEN],
+                check=False,
+                capture_output=True,
+                timeout=10,
+            )
 
         log(f"{APP_TO_OPEN} launched.", GREEN)
     except Exception as e:
@@ -957,8 +985,11 @@ def open_app():
 
 def on_trigger():
     """Fired on double-clap detection. Signals the main thread to handle activation."""
-    global last_trigger_time
+    global last_trigger_time, cycle_running
     now = time.time()
+
+    if cycle_running:
+        return
 
     if not trigger_lock.acquire(blocking=False):
         return
@@ -966,6 +997,7 @@ def on_trigger():
         if now - last_trigger_time < COOLDOWN_AFTER_TRIGGER:
             return
         last_trigger_time = now
+        cycle_running = True
 
         print(ACTIVATION_MSG, flush=True)
         _trigger_event.set()
@@ -975,59 +1007,102 @@ def on_trigger():
 
 
 def audio_callback(indata, frames, time_info, status):
-    global first_clap_time, last_trigger_time, _sustained_chunk_count
+    global first_clap_time, last_trigger_time, _sustained_chunk_count, _noise_floor
 
     if time.time() - last_trigger_time < COOLDOWN_AFTER_TRIGGER:
         return
 
     rms = np.sqrt(np.mean(indata**2))
 
-    if rms >= CLAP_THRESHOLD:
-        _sustained_chunk_count += 1
-        if _sustained_chunk_count > MAX_SUSTAINED_CHUNKS:
-            return
-
-        # Crest factor check: claps are spiky, voice is not
-        peak = np.max(np.abs(indata))
-        crest_factor = peak / (rms + 1e-9)
-        if crest_factor < MIN_CREST_FACTOR:
-            return
-
-        # Frequency check: clap energy lives in 1.5-6kHz
-        spectrum = np.fft.rfft(indata[:, 0])
-        freqs = np.fft.rfftfreq(frames, d=1.0 / SAMPLE_RATE)
-        energy = np.abs(spectrum) ** 2
-        total_energy = np.sum(energy)
-        if total_energy == 0:
-            return
-        band_mask = (freqs >= 1500) & (freqs <= 6000)
-        freq_ratio = np.sum(energy[band_mask]) / total_energy
-        if freq_ratio < FREQ_RATIO_THRESHOLD:
-            return
-
-        now = time.time()
-
-        if first_clap_time is None:
-            first_clap_time = now
-            _sustained_chunk_count = 0  # reset so second clap can register
-        else:
-            gap = now - first_clap_time
-            if gap < MIN_CLAP_GAP:
-                return
-            elif gap <= DOUBLE_CLAP_WINDOW:
-                first_clap_time = None
-                _sustained_chunk_count = 0
-                on_trigger()
-            else:
-                first_clap_time = now
-                _sustained_chunk_count = 0
+    # Update noise floor (exponential moving average of quiet periods)
+    if rms < _noise_floor:
+        _noise_floor = (
+            _noise_floor_alpha * rms + (1 - _noise_floor_alpha) * _noise_floor
+        )
     else:
+        _noise_floor = (
+            _noise_floor_alpha * _noise_floor + (1 - _noise_floor_alpha) * rms
+        )
+
+    # Dynamic threshold: must be significantly above noise floor
+    dynamic_threshold = max(CLAP_THRESHOLD, _noise_floor * 4.0)
+    if rms < dynamic_threshold:
         _sustained_chunk_count = 0
         if (
             first_clap_time is not None
             and (time.time() - first_clap_time) > DOUBLE_CLAP_WINDOW
         ):
             first_clap_time = None
+        return
+
+    # Sudden onset detection: clap should be much louder than recent average
+    _sustained_chunk_count += 1
+    if _sustained_chunk_count > MAX_SUSTAINED_CHUNKS:
+        return
+
+    # Crest factor check: claps are spiky, voice/music is not
+    peak = np.max(np.abs(indata))
+    crest_factor = peak / (rms + 1e-9)
+    if crest_factor < MIN_CREST_FACTOR:
+        if DEBUG_CLAP:
+            print(
+                f"  {DIM}REJECTED: crest={crest_factor:.2f} (need ≥{MIN_CREST_FACTOR}){RESET}",
+                flush=True,
+            )
+        return
+
+    # Zero-crossing rate: claps have high ZCR due to broadband nature
+    zero_crossings = np.sum(np.abs(np.diff(np.sign(indata[:, 0]))) > 0)
+    zcr = zero_crossings / frames
+    if zcr < 0.04:  # Claps typically have high zero-crossing rates
+        if DEBUG_CLAP:
+            print(f"  {DIM}REJECTED: zcr={zcr:.2f} (need ≥0.04){RESET}", flush=True)
+        return
+
+    # Frequency check: clap energy lives in 1.5-6kHz
+    spectrum = np.fft.rfft(indata[:, 0])
+    freqs = np.fft.rfftfreq(frames, d=1.0 / SAMPLE_RATE)
+    energy = np.abs(spectrum) ** 2
+    total_energy = np.sum(energy)
+    if total_energy == 0:
+        return
+    band_mask = (freqs >= 1500) & (freqs <= 6000)
+    freq_ratio = np.sum(energy[band_mask]) / total_energy
+    if freq_ratio < FREQ_RATIO_THRESHOLD:
+        if DEBUG_CLAP:
+            print(
+                f"  {DIM}REJECTED: hf_ratio={freq_ratio:.2f} (need ≥{FREQ_RATIO_THRESHOLD}){RESET}",
+                flush=True,
+            )
+        return
+
+    # Additional check: reject if too much energy in low frequencies (music/bass)
+    low_freq_mask = (freqs >= 20) & (freqs < 300)
+    low_freq_ratio = np.sum(energy[low_freq_mask]) / total_energy
+    if low_freq_ratio > 0.4:  # Too much bass = likely music, not clap
+        if DEBUG_CLAP:
+            print(
+                f"  {DIM}REJECTED: lf_ratio={low_freq_ratio:.2f} (need <0.40){RESET}",
+                flush=True,
+            )
+        return
+
+    now = time.time()
+
+    if first_clap_time is None:
+        first_clap_time = now
+        _sustained_chunk_count = 0  # reset so second clap can register
+    else:
+        gap = now - first_clap_time
+        if gap < MIN_CLAP_GAP:
+            return
+        elif gap <= DOUBLE_CLAP_WINDOW:
+            first_clap_time = None
+            _sustained_chunk_count = 0
+            on_trigger()
+        else:
+            first_clap_time = now
+            _sustained_chunk_count = 0
 
 
 def main():
@@ -1134,6 +1209,7 @@ def main():
             show_gif("/Users/thirumarandeepak/Documents/misu/freaky.gif")
 
             log("Trigger sequence complete.", GREEN)
+            cycle_running = False
 
     except KeyboardInterrupt:
         print(f"\n  {YELLOW}M.I.S.U. shutting down. Goodbye.{RESET}\n")
