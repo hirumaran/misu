@@ -88,6 +88,7 @@ _cached_audio_url = None
 _active_audio_proc = None
 _audio_paused = False
 APP_TO_OPEN = DEFAULT_APP
+_trigger_event = threading.Event()
 
 
 def discover_apps():
@@ -447,7 +448,8 @@ def stream_youtube_audio():
         _active_audio_proc = None
 
 
-def show_image():
+def show_image_with_ctrl_p():
+    """Show Jarvis image with drag support and ⌘+P to change app."""
     img_path = "/Users/thirumarandeepak/Documents/misu/Jarvis.jpeg"
     try:
         import ctypes
@@ -459,7 +461,6 @@ def show_image():
         new_w, new_h = int(orig_w * 1.5), int(orig_h * 1.5)
         pil_img = pil_img.resize((new_w, new_h), Image.LANCZOS)
 
-        # Position window before creating it
         os.environ["SDL_VIDEO_WINDOW_POS"] = "40,40"
 
         img = pygame.image.fromstring(pil_img.tobytes(), (new_w, new_h), "RGB")
@@ -468,7 +469,6 @@ def show_image():
         screen.blit(img, (0, 0))
         pygame.display.flip()
 
-        # Bring pygame window to front via AppleScript
         subprocess.Popen(
             [
                 "osascript",
@@ -480,7 +480,6 @@ def show_image():
             stderr=subprocess.DEVNULL,
         )
 
-        # ── Load SDL2 and get SDL_Window pointer for dragging ──
         libsdl2 = None
         window_ptr = None
         can_drag = False
@@ -499,7 +498,6 @@ def show_image():
 
         if libsdl2:
             try:
-                # Set up function signatures
                 libsdl2.SDL_GetWindowPosition.argtypes = [
                     ctypes.c_void_p,
                     ctypes.POINTER(ctypes.c_int),
@@ -511,7 +509,6 @@ def show_image():
                     ctypes.c_int,
                 ]
 
-                # ── Strategy 1: SDL_GL_GetCurrentWindow (pygame2 ≥ 2.1) ──
                 try:
                     libsdl2.SDL_GL_GetCurrentWindow.restype = ctypes.c_void_p
                     libsdl2.SDL_GL_GetCurrentWindow.argtypes = []
@@ -522,7 +519,6 @@ def show_image():
                 except (AttributeError, OSError):
                     pass
 
-                # ── Strategy 2: SDL_GetWindowFromID(1) — first window ──
                 if not can_drag:
                     try:
                         libsdl2.SDL_GetWindowFromID.restype = ctypes.c_void_p
@@ -534,7 +530,6 @@ def show_image():
                     except (AttributeError, OSError):
                         pass
 
-                # ── Strategy 3: PyCapsule with discovered name ──
                 if not can_drag:
                     wm_info = pygame.display.get_wm_info()
                     raw_capsule = wm_info.get("window")
@@ -544,7 +539,6 @@ def show_image():
                             can_drag = True
                             log("SDL2 window pointer (raw int).", GREEN)
                         else:
-                            # Discover the actual capsule name
                             ctypes.pythonapi.PyCapsule_GetName.restype = ctypes.c_char_p
                             ctypes.pythonapi.PyCapsule_GetName.argtypes = [
                                 ctypes.py_object
@@ -569,9 +563,6 @@ def show_image():
                                     raw_capsule, actual_name
                                 )
                                 if window_ptr:
-                                    # This is likely an NSWindow*, not SDL_Window*.
-                                    # Use SDL_GetWindowFromID(1) as the real SDL handle
-                                    # and only use this as proof the window exists.
                                     try:
                                         libsdl2.SDL_GetWindowFromID.restype = (
                                             ctypes.c_void_p
@@ -599,16 +590,19 @@ def show_image():
             log("SDL2 library not found — dragging disabled.", YELLOW)
 
         if can_drag:
-            log("Drag: left-click + move | Close: right-click / Esc / Q", DIM)
+            log(
+                "Drag: left-click + move | Close: right-click / Esc / Q | ⌘+P: change app",
+                DIM,
+            )
         else:
-            log("Close: right-click / Esc / Q", DIM)
+            log("Close: right-click / Esc / Q | ⌘+P: change app", DIM)
 
         dragging = False
         start = time.time()
         running = True
         clock = pygame.time.Clock()
+        cmd_pressed = False
 
-        # Cache initial window position so we never need SDL_GetWindowPosition
         if can_drag:
             wx_val, wy_val = ctypes.c_int(0), ctypes.c_int(0)
             libsdl2.SDL_GetWindowPosition(
@@ -619,15 +613,60 @@ def show_image():
             win_x, win_y = 40, 40
 
         while running:
-            # Accumulate all pending motion deltas in one pass
             total_dx, total_dy = 0, 0
 
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     running = False
                 elif event.type == pygame.KEYDOWN:
-                    if event.key in (pygame.K_ESCAPE, pygame.K_q, pygame.K_RETURN):
+                    if event.key in (
+                        pygame.K_LMETA,
+                        pygame.K_RMETA,
+                        pygame.K_LSUPER,
+                        pygame.K_RSUPER,
+                    ):
+                        cmd_pressed = True
+                    elif event.key == pygame.K_p and cmd_pressed:
+                        pygame.quit()
+                        print(f"\n  {CYAN}Changing default app...{RESET}")
+                        show_app_menu()
+                        print(f"\n  {GREEN}App changed to {YELLOW}{APP_TO_OPEN}{RESET}")
+                        print(f"  {CYAN}Restarting image display...{RESET}\n")
+                        pygame.init()
+                        pil_img = Image.open(img_path).convert("RGB")
+                        orig_w, orig_h = pil_img.size
+                        new_w, new_h = int(orig_w * 1.5), int(orig_h * 1.5)
+                        pil_img = pil_img.resize((new_w, new_h), Image.LANCZOS)
+                        os.environ["SDL_VIDEO_WINDOW_POS"] = "40,40"
+                        img = pygame.image.fromstring(
+                            pil_img.tobytes(), (new_w, new_h), "RGB"
+                        )
+                        screen = pygame.display.set_mode((new_w, new_h), pygame.NOFRAME)
+                        pygame.display.set_caption("M.I.S.U.")
+                        screen.blit(img, (0, 0))
+                        pygame.display.flip()
+                        if libsdl2:
+                            try:
+                                libsdl2.SDL_GL_GetCurrentWindow.restype = (
+                                    ctypes.c_void_p
+                                )
+                                window_ptr = libsdl2.SDL_GL_GetCurrentWindow()
+                                if window_ptr:
+                                    can_drag = True
+                            except:
+                                pass
+                        start = time.time()
+                        continue
+                    elif event.key in (pygame.K_ESCAPE, pygame.K_q, pygame.K_RETURN):
                         running = False
+                elif event.type == pygame.KEYUP:
+                    if event.key in (
+                        pygame.K_LMETA,
+                        pygame.K_RMETA,
+                        pygame.K_LSUPER,
+                        pygame.K_RSUPER,
+                    ):
+                        cmd_pressed = False
                 elif event.type == pygame.MOUSEBUTTONDOWN:
                     if event.button == 1:
                         dragging = True
@@ -640,7 +679,6 @@ def show_image():
                     total_dx += event.rel[0]
                     total_dy += event.rel[1]
 
-            # Apply accumulated motion in a single SDL call
             if total_dx != 0 or total_dy != 0:
                 win_x += total_dx
                 win_y += total_dy
@@ -649,7 +687,6 @@ def show_image():
             if time.time() - start > 30:
                 running = False
 
-            # High FPS during drag for smoothness, throttle when idle
             if dragging:
                 clock.tick(120)
             else:
@@ -724,7 +761,7 @@ def open_app():
 
 
 def on_trigger():
-    """Fired on double-clap detection. Plays home.mp3, then launches app + audio."""
+    """Fired on double-clap detection. Signals the main thread to handle activation."""
     global last_trigger_time
     now = time.time()
 
@@ -736,19 +773,7 @@ def on_trigger():
         last_trigger_time = now
 
         print(ACTIVATION_MSG, flush=True)
-
-        # Play home.mp3 first
-        home_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "home.mp3")
-        if os.path.isfile(home_path):
-            log("Playing home.mp3...", CYAN)
-            subprocess.call(["afplay", home_path])
-
-        # Then launch app + audio in parallel threads
-        t_audio = threading.Thread(target=stream_youtube_audio, daemon=True)
-        t_app = threading.Thread(target=open_app, daemon=True)
-        t_audio.start()
-        t_app.start()
-        log("Trigger threads launched.", GREEN)
+        _trigger_event.set()
 
     finally:
         trigger_lock.release()
@@ -858,297 +883,31 @@ def main():
 
     threading.Thread(target=listener_loop, daemon=True).start()
 
-    # Pygame must run on the main thread (macOS requirement)
-    pygame.init()
-
-    # Show image with Ctrl+P handling
-    def show_image_with_ctrl_p():
-        """Wrapper to handle Ctrl+P for changing app."""
-        img_path = "/Users/thirumarandeepak/Documents/misu/Jarvis.jpeg"
-        try:
-            import ctypes
-
-            log("Opening Jarvis image...", CYAN)
-
-            pil_img = Image.open(img_path).convert("RGB")
-            orig_w, orig_h = pil_img.size
-            new_w, new_h = int(orig_w * 1.5), int(orig_h * 1.5)
-            pil_img = pil_img.resize((new_w, new_h), Image.LANCZOS)
-
-            # Position window before creating it
-            os.environ["SDL_VIDEO_WINDOW_POS"] = "40,40"
-
-            img = pygame.image.fromstring(pil_img.tobytes(), (new_w, new_h), "RGB")
-            screen = pygame.display.set_mode((new_w, new_h), pygame.NOFRAME)
-            pygame.display.set_caption("M.I.S.U.")
-            screen.blit(img, (0, 0))
-            pygame.display.flip()
-
-            # Bring pygame window to front via AppleScript
-            subprocess.Popen(
-                [
-                    "osascript",
-                    "-e",
-                    f'tell application "System Events" to set frontmost of every process '
-                    f"whose unix id is {os.getpid()} to true",
-                ],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-
-            # ── Load SDL2 and get SDL_Window pointer for dragging ──
-            libsdl2 = None
-            window_ptr = None
-            can_drag = False
-
-            for lib_name in [
-                "libSDL2-2.0.0.dylib",
-                "libSDL2.dylib",
-                "/usr/local/lib/libSDL2.dylib",
-                "/opt/homebrew/lib/libSDL2.dylib",
-            ]:
-                try:
-                    libsdl2 = ctypes.CDLL(lib_name)
-                    break
-                except OSError:
-                    continue
-
-            if libsdl2:
-                try:
-                    # Set up function signatures
-                    libsdl2.SDL_GetWindowPosition.argtypes = [
-                        ctypes.c_void_p,
-                        ctypes.POINTER(ctypes.c_int),
-                        ctypes.POINTER(ctypes.c_int),
-                    ]
-                    libsdl2.SDL_SetWindowPosition.argtypes = [
-                        ctypes.c_void_p,
-                        ctypes.c_int,
-                        ctypes.c_int,
-                    ]
-
-                    # ── Strategy 1: SDL_GL_GetCurrentWindow (pygame2 ≥ 2.1) ──
-                    try:
-                        libsdl2.SDL_GL_GetCurrentWindow.restype = ctypes.c_void_p
-                        libsdl2.SDL_GL_GetCurrentWindow.argtypes = []
-                        window_ptr = libsdl2.SDL_GL_GetCurrentWindow()
-                        if window_ptr:
-                            can_drag = True
-                            log("SDL2 window via SDL_GL_GetCurrentWindow.", GREEN)
-                    except (AttributeError, OSError):
-                        pass
-
-                    # ── Strategy 2: SDL_GetWindowFromID(1) — first window ──
-                    if not can_drag:
-                        try:
-                            libsdl2.SDL_GetWindowFromID.restype = ctypes.c_void_p
-                            libsdl2.SDL_GetWindowFromID.argtypes = [ctypes.c_uint32]
-                            window_ptr = libsdl2.SDL_GetWindowFromID(1)
-                            if window_ptr:
-                                can_drag = True
-                                log("SDL2 window via SDL_GetWindowFromID(1).", GREEN)
-                        except (AttributeError, OSError):
-                            pass
-
-                    # ── Strategy 3: PyCapsule with discovered name ──
-                    if not can_drag:
-                        wm_info = pygame.display.get_wm_info()
-                        raw_capsule = wm_info.get("window")
-                        if raw_capsule is not None:
-                            if isinstance(raw_capsule, int):
-                                window_ptr = raw_capsule
-                                can_drag = True
-                                log("SDL2 window pointer (raw int).", GREEN)
-                            else:
-                                # Discover the actual capsule name
-                                ctypes.pythonapi.PyCapsule_GetName.restype = (
-                                    ctypes.c_char_p
-                                )
-                                ctypes.pythonapi.PyCapsule_GetName.argtypes = [
-                                    ctypes.py_object
-                                ]
-                                try:
-                                    actual_name = ctypes.pythonapi.PyCapsule_GetName(
-                                        raw_capsule
-                                    )
-                                    log(f"PyCapsule name = {actual_name!r}", DIM)
-                                except Exception:
-                                    actual_name = None
-
-                                ctypes.pythonapi.PyCapsule_GetPointer.restype = (
-                                    ctypes.c_void_p
-                                )
-                                ctypes.pythonapi.PyCapsule_GetPointer.argtypes = [
-                                    ctypes.py_object,
-                                    ctypes.c_char_p,
-                                ]
-                                try:
-                                    window_ptr = ctypes.pythonapi.PyCapsule_GetPointer(
-                                        raw_capsule, actual_name
-                                    )
-                                    if window_ptr:
-                                        # This is likely an NSWindow*, not SDL_Window*.
-                                        # Use SDL_GetWindowFromID(1) as the real SDL handle
-                                        # and only use this as proof the window exists.
-                                        try:
-                                            libsdl2.SDL_GetWindowFromID.restype = (
-                                                ctypes.c_void_p
-                                            )
-                                            libsdl2.SDL_GetWindowFromID.argtypes = [
-                                                ctypes.c_uint32
-                                            ]
-                                            sdl_win = libsdl2.SDL_GetWindowFromID(1)
-                                            if sdl_win:
-                                                window_ptr = sdl_win
-                                        except Exception:
-                                            pass
-                                        can_drag = True
-                                        log("SDL2 window via PyCapsule unwrap.", GREEN)
-                                except (ValueError, OSError) as e:
-                                    log(f"PyCapsule unwrap failed: {e}", YELLOW)
-
-                    if not can_drag:
-                        log("Could not get SDL2 window — dragging disabled.", YELLOW)
-
-                except Exception as e:
-                    log(f"SDL2 drag setup failed: {e}", YELLOW)
-                    can_drag = False
-            else:
-                log("SDL2 library not found — dragging disabled.", YELLOW)
-
-            if can_drag:
-                log(
-                    "Drag: left-click + move | Close: right-click / Esc / Q | ⌘+P: change app",
-                    DIM,
-                )
-            else:
-                log("Close: right-click / Esc / Q | ⌘+P: change app", DIM)
-
-            dragging = False
-            start = time.time()
-            running = True
-            clock = pygame.time.Clock()
-
-            # Track modifier keys (Command key on Mac)
-            cmd_pressed = False
-
-            # Cache initial window position so we never need SDL_GetWindowPosition
-            if can_drag:
-                wx_val, wy_val = ctypes.c_int(0), ctypes.c_int(0)
-                libsdl2.SDL_GetWindowPosition(
-                    window_ptr, ctypes.byref(wx_val), ctypes.byref(wy_val)
-                )
-                win_x, win_y = wx_val.value, wy_val.value
-            else:
-                win_x, win_y = 40, 40
-
-            while running:
-                # Accumulate all pending motion deltas in one pass
-                total_dx, total_dy = 0, 0
-
-                for event in pygame.event.get():
-                    if event.type == pygame.QUIT:
-                        running = False
-                    elif event.type == pygame.KEYDOWN:
-                        # Check for Command key (Left/Right Command on Mac)
-                        if event.key in (
-                            pygame.K_LMETA,
-                            pygame.K_RMETA,
-                            pygame.K_LSUPER,
-                            pygame.K_RSUPER,
-                        ):
-                            cmd_pressed = True
-                        elif event.key == pygame.K_p and cmd_pressed:
-                            # ⌘+P pressed - show app menu
-                            pygame.quit()
-                            print(f"\n  {CYAN}Changing default app...{RESET}")
-                            show_app_menu()
-                            print(
-                                f"\n  {GREEN}App changed to {YELLOW}{APP_TO_OPEN}{RESET}"
-                            )
-                            print(f"  {CYAN}Restarting image display...{RESET}\n")
-                            # Re-initialize pygame and show image again
-                            pygame.init()
-                            pil_img = Image.open(img_path).convert("RGB")
-                            orig_w, orig_h = pil_img.size
-                            new_w, new_h = int(orig_w * 1.5), int(orig_h * 1.5)
-                            pil_img = pil_img.resize((new_w, new_h), Image.LANCZOS)
-                            os.environ["SDL_VIDEO_WINDOW_POS"] = "40,40"
-                            img = pygame.image.fromstring(
-                                pil_img.tobytes(), (new_w, new_h), "RGB"
-                            )
-                            screen = pygame.display.set_mode(
-                                (new_w, new_h), pygame.NOFRAME
-                            )
-                            pygame.display.set_caption("M.I.S.U.")
-                            screen.blit(img, (0, 0))
-                            pygame.display.flip()
-                            # Re-get window pointer
-                            if libsdl2:
-                                try:
-                                    libsdl2.SDL_GL_GetCurrentWindow.restype = (
-                                        ctypes.c_void_p
-                                    )
-                                    window_ptr = libsdl2.SDL_GL_GetCurrentWindow()
-                                    if window_ptr:
-                                        can_drag = True
-                                except:
-                                    pass
-                            start = time.time()
-                            continue
-                        elif event.key in (
-                            pygame.K_ESCAPE,
-                            pygame.K_q,
-                            pygame.K_RETURN,
-                        ):
-                            running = False
-                    elif event.type == pygame.KEYUP:
-                        if event.key in (
-                            pygame.K_LMETA,
-                            pygame.K_RMETA,
-                            pygame.K_LSUPER,
-                            pygame.K_RSUPER,
-                        ):
-                            cmd_pressed = False
-                    elif event.type == pygame.MOUSEBUTTONDOWN:
-                        if event.button == 1:
-                            dragging = True
-                        elif event.button == 3:
-                            running = False
-                    elif event.type == pygame.MOUSEBUTTONUP:
-                        if event.button == 1:
-                            dragging = False
-                    elif event.type == pygame.MOUSEMOTION and dragging and can_drag:
-                        total_dx += event.rel[0]
-                        total_dy += event.rel[1]
-
-                # Apply accumulated motion in a single SDL call
-                if total_dx != 0 or total_dy != 0:
-                    win_x += total_dx
-                    win_y += total_dy
-                    libsdl2.SDL_SetWindowPosition(window_ptr, win_x, win_y)
-
-                if time.time() - start > 30:
-                    running = False
-
-                # High FPS during drag for smoothness, throttle when idle
-                if dragging:
-                    clock.tick(120)
-                else:
-                    clock.tick(60)
-
-            pygame.quit()
-            log("Image closed.", DIM)
-
-        except Exception as e:
-            log(f"Image error: {e}", RED)
-
-    show_image_with_ctrl_p()
-
-    # Keep main thread alive after image closes so listener keeps working
+    # Main thread waits for triggers, then handles everything
     try:
         while True:
-            time.sleep(1)
+            _trigger_event.wait()
+            _trigger_event.clear()
+
+            # Play home.mp3 first
+            home_path = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "home.mp3"
+            )
+            if os.path.isfile(home_path):
+                log("Playing home.mp3...", CYAN)
+                subprocess.call(["afplay", home_path])
+
+            # Show image with ⌘+P handling (blocks until closed)
+            pygame.init()
+            show_image_with_ctrl_p()
+
+            # Then launch app + audio in parallel threads
+            t_audio = threading.Thread(target=stream_youtube_audio, daemon=True)
+            t_app = threading.Thread(target=open_app, daemon=True)
+            t_audio.start()
+            t_app.start()
+            log("Trigger threads launched.", GREEN)
+
     except KeyboardInterrupt:
         print(f"\n  {YELLOW}M.I.S.U. shutting down. Goodbye.{RESET}\n")
 
