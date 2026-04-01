@@ -240,6 +240,7 @@ def stream_youtube_audio():
         elif audio_player_cmd == "mpv":
             _active_audio_proc = subprocess.Popen(
                 ["mpv", "--no-video", "--really-quiet", direct_url],
+                stdin=subprocess.PIPE,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
@@ -355,10 +356,10 @@ def on_trigger():
         # Launch all in parallel threads so none blocks the listener
         t_audio = threading.Thread(target=stream_youtube_audio, daemon=True)
         t_app = threading.Thread(target=open_app, daemon=True)
-        t_image = threading.Thread(target=show_image, daemon=True)
         t_audio.start()
         t_app.start()
-        t_image.start()
+        # Image opens last so it appears on top
+        threading.Timer(0.5, show_image).start()
         # Don't join — let them run, we return to listening after cooldown
 
     finally:
@@ -440,17 +441,21 @@ def main():
 
     print(f"  {GREEN}{BOLD}All checks passed.{RESET}")
     print(f"  {CYAN}Listening for double clap... (Ctrl+C to stop){RESET}")
-    print(
-        f"  {DIM}Controls: {YELLOW}p{RESET}{DIM} = play music, {YELLOW}s{RESET}{DIM} = pause/resume{RESET}\n"
-    )
+    print(f"  {DIM}Controls: {YELLOW}s{RESET}{DIM} = pause/resume{RESET}\n")
 
     # Pre-fetch audio URL for instant playback
     prefetch_audio_url()
 
-    # Auto-launch everything on startup
+    # Play home.mp3 first, then auto-launch everything
+    home_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "home.mp3")
+    if os.path.isfile(home_path):
+        log("Playing home.mp3...", CYAN)
+        subprocess.call(["afplay", home_path])
+
     threading.Thread(target=stream_youtube_audio, daemon=True).start()
     threading.Thread(target=open_app, daemon=True).start()
-    threading.Thread(target=show_image, daemon=True).start()
+    # Image opens last so it appears on top
+    threading.Timer(0.5, show_image).start()
 
     try:
         with sd.InputStream(
@@ -462,9 +467,7 @@ def main():
         ):
             while True:
                 cmd = input().strip().lower()
-                if cmd == "p":
-                    threading.Thread(target=stream_youtube_audio, daemon=True).start()
-                elif cmd == "s":
+                if cmd == "s":
                     toggle_pause()
     except KeyboardInterrupt:
         print(f"\n  {YELLOW}M.I.S.U. shutting down. Goodbye.{RESET}\n")
