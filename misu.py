@@ -19,6 +19,8 @@ import subprocess
 import threading
 import signal
 import atexit
+import json
+import curses
 import pygame
 from PIL import Image
 import numpy as np
@@ -27,7 +29,6 @@ import sounddevice as sd
 # ═══════════════════════════════════════════════════════════════
 # ██  C O N F I G U R A T I O N  ██
 # ═══════════════════════════════════════════════════════════════
-APP_TO_OPEN = "Codex"
 YOUTUBE_URL = "https://youtu.be/pAgnJDJN4VA?si=zAr_El1xtW_ugq8K"
 CLAP_THRESHOLD = 0.15  # was 0.25, lower so it actually catches claps
 DOUBLE_CLAP_WINDOW = 0.7  # Max seconds between two claps
@@ -38,6 +39,11 @@ MAX_SUSTAINED_CHUNKS = 6  # was 4, claps can span a few more blocks
 MIN_CREST_FACTOR = 2.5  # NEW: peak/RMS ratio, claps are spiky, voice isn't
 SAMPLE_RATE = 44100
 BLOCK_SIZE = 1024
+
+CONFIG_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "misu_config.json"
+)
+DEFAULT_APP = "Codex"
 # ═══════════════════════════════════════════════════════════════
 
 # ANSI color helpers
@@ -78,6 +84,169 @@ _sustained_chunk_count = 0
 _cached_audio_url = None
 _active_audio_proc = None
 _audio_paused = False
+APP_TO_OPEN = DEFAULT_APP
+
+
+def discover_apps():
+    """Scan macOS app directories and return sorted list of installed apps."""
+    search_dirs = [
+        "/Applications",
+        "/Applications/Utilities",
+        "/System/Applications",
+        "/System/Applications/Utilities",
+        os.path.expanduser("~/Applications"),
+    ]
+    apps = set()
+    for d in search_dirs:
+        if os.path.isdir(d):
+            for entry in os.listdir(d):
+                if entry.endswith(".app"):
+                    apps.add(entry[:-4])  # strip ".app" extension
+    return sorted(apps, key=str.lower)
+
+
+def load_config():
+    """Load the saved app preference from config file."""
+    global APP_TO_OPEN
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r") as f:
+                config = json.load(f)
+                saved_app = config.get("app_to_open", DEFAULT_APP)
+                APP_TO_OPEN = saved_app
+                log(f"Loaded app preference: {APP_TO_OPEN}", DIM)
+        except Exception as e:
+            log(f"Could not load config: {e}", YELLOW)
+            APP_TO_OPEN = DEFAULT_APP
+    else:
+        APP_TO_OPEN = DEFAULT_APP
+
+
+def save_config():
+    """Save the current app preference to config file."""
+    try:
+        with open(CONFIG_FILE, "w") as f:
+            json.dump({"app_to_open": APP_TO_OPEN}, f)
+    except Exception as e:
+        log(f"Could not save config: {e}", YELLOW)
+
+
+def _run_selector(apps, start_idx):
+    """Curses inner loop. Returns the selected app name, or None if cancelled."""
+    result = [None]  # use list so inner function can write to it
+
+    def _curses_main(stdscr):
+        curses.curs_set(0)
+        curses.start_color()
+        curses.use_default_colors()
+        curses.init_pair(1, curses.COLOR_CYAN, -1)  # highlighted row
+        curses.init_pair(2, curses.COLOR_YELLOW, -1)  # label text
+        curses.init_pair(3, curses.COLOR_GREEN, -1)  # selected marker
+
+        current = start_idx
+        scroll_offset = 0
+        search = ""
+        filtered = apps[:]
+
+        def refresh_filter():
+            nonlocal filtered, current, scroll_offset
+            if search:
+                filtered = [a for a in apps if search.lower() in a.lower()]
+            else:
+                filtered = apps[:]
+            current = 0
+            scroll_offset = 0
+
+        while True:
+            stdscr.erase()
+            height, width = stdscr.getmaxyx()
+            visible_rows = height - 5  # reserve rows for header + search bar
+
+            # ── Header ──
+            header = " SELECT APP  (↑↓ navigate · Enter select · Esc cancel · type to filter)"
+            stdscr.attron(curses.color_pair(1) | curses.A_BOLD)
+            stdscr.addstr(0, 0, header[: width - 1])
+            stdscr.attroff(curses.color_pair(1) | curses.A_BOLD)
+
+            # ── Search bar ──
+            stdscr.attron(curses.color_pair(2))
+            stdscr.addstr(1, 0, f" Filter: {search}_"[: width - 1])
+            stdscr.attroff(curses.color_pair(2))
+
+            stdscr.addstr(2, 0, "─" * min(width - 1, 60))
+
+            # ── App list ──
+            if not filtered:
+                stdscr.addstr(3, 2, "(no matches)")
+            else:
+                # Keep cursor in view
+                if current < scroll_offset:
+                    scroll_offset = current
+                elif current >= scroll_offset + visible_rows:
+                    scroll_offset = current - visible_rows + 1
+
+                for i, app in enumerate(
+                    filtered[scroll_offset : scroll_offset + visible_rows]
+                ):
+                    row = 3 + i
+                    abs_idx = i + scroll_offset
+                    prefix = " ▸ " if abs_idx == current else "   "
+
+                    if abs_idx == current:
+                        stdscr.attron(curses.color_pair(1) | curses.A_BOLD)
+                        stdscr.addstr(row, 0, f"{prefix}{app}"[: width - 1])
+                        stdscr.attroff(curses.color_pair(1) | curses.A_BOLD)
+                    else:
+                        stdscr.addstr(row, 0, f"{prefix}{app}"[: width - 1])
+
+            stdscr.refresh()
+
+            key = stdscr.getch()
+
+            if key == curses.KEY_UP and filtered:
+                current = (current - 1) % len(filtered)
+            elif key == curses.KEY_DOWN and filtered:
+                current = (current + 1) % len(filtered)
+            elif key in (curses.KEY_ENTER, 10, 13):  # Enter
+                if filtered:
+                    result[0] = filtered[current]
+                return
+            elif key == 27:  # Escape
+                return
+            elif key in (curses.KEY_BACKSPACE, 127, 8):
+                search = search[:-1]
+                refresh_filter()
+            elif 32 <= key <= 126:  # printable character
+                search += chr(key)
+                refresh_filter()
+
+    curses.wrapper(_curses_main)
+    return result[0]
+
+
+def show_app_menu():
+    """Arrow-key dropdown to pick the default app."""
+    global APP_TO_OPEN
+
+    apps = discover_apps()
+    if not apps:
+        log("No apps found — keeping current default.", YELLOW)
+        return
+
+    # Start cursor on the currently saved app if it exists
+    try:
+        start_idx = apps.index(APP_TO_OPEN)
+    except ValueError:
+        start_idx = 0
+
+    selected = _run_selector(apps, start_idx)
+
+    if selected and selected != APP_TO_OPEN:
+        APP_TO_OPEN = selected
+        save_config()
+        print(f"\n  {GREEN}✓ Default app set to: {YELLOW}{APP_TO_OPEN}{RESET}\n")
+    else:
+        print(f"\n  Keeping {YELLOW}{APP_TO_OPEN}{RESET} as default.\n")
 
 
 def log(msg, color=RESET):
@@ -374,14 +543,20 @@ def show_image():
                         else:
                             # Discover the actual capsule name
                             ctypes.pythonapi.PyCapsule_GetName.restype = ctypes.c_char_p
-                            ctypes.pythonapi.PyCapsule_GetName.argtypes = [ctypes.py_object]
+                            ctypes.pythonapi.PyCapsule_GetName.argtypes = [
+                                ctypes.py_object
+                            ]
                             try:
-                                actual_name = ctypes.pythonapi.PyCapsule_GetName(raw_capsule)
+                                actual_name = ctypes.pythonapi.PyCapsule_GetName(
+                                    raw_capsule
+                                )
                                 log(f"PyCapsule name = {actual_name!r}", DIM)
                             except Exception:
                                 actual_name = None
 
-                            ctypes.pythonapi.PyCapsule_GetPointer.restype = ctypes.c_void_p
+                            ctypes.pythonapi.PyCapsule_GetPointer.restype = (
+                                ctypes.c_void_p
+                            )
                             ctypes.pythonapi.PyCapsule_GetPointer.argtypes = [
                                 ctypes.py_object,
                                 ctypes.c_char_p,
@@ -395,8 +570,12 @@ def show_image():
                                     # Use SDL_GetWindowFromID(1) as the real SDL handle
                                     # and only use this as proof the window exists.
                                     try:
-                                        libsdl2.SDL_GetWindowFromID.restype = ctypes.c_void_p
-                                        libsdl2.SDL_GetWindowFromID.argtypes = [ctypes.c_uint32]
+                                        libsdl2.SDL_GetWindowFromID.restype = (
+                                            ctypes.c_void_p
+                                        )
+                                        libsdl2.SDL_GetWindowFromID.argtypes = [
+                                            ctypes.c_uint32
+                                        ]
                                         sdl_win = libsdl2.SDL_GetWindowFromID(1)
                                         if sdl_win:
                                             window_ptr = sdl_win
@@ -632,6 +811,12 @@ def main():
     print(f"  {YELLOW}nohup python3 {script_path} &> /tmp/misu.log &{RESET}\n")
     print(f"  {DIM}Stop:{RESET}")
     print(f"  {YELLOW}pkill -f misu.py{RESET}\n")
+
+    # Load saved config first
+    load_config()
+
+    # Show app selection menu
+    show_app_menu()
 
     print_config()
 
