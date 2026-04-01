@@ -76,11 +76,13 @@ BANNER = rf"""
 {RESET}"""
 
 ACTIVATION_MSG = f"""
-{YELLOW}{BOLD}
-  ╔══════════════════════════════════════════╗
-  ║     DOUBLE CLAP DETECTED — ACTIVATING   ║
-  ║      S Y S T E M   E N G A G E D         ║
-  ╚══════════════════════════════════════════╝
+{RED}
+ ╔═══════════════════════════════════════════╗
+ ║{YELLOW}                                           {RED}║
+ ║{YELLOW}     DOUBLE CLAP DETECTED — ACTIVATING     {RED}║
+ ║{YELLOW}      S Y S T E M   E N G A G E D          {RED}║
+ ║{YELLOW}                                           {RED}║
+ ╚═══════════════════════════════════════════╝
 {RESET}"""
 
 # ── Global state ──
